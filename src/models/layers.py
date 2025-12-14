@@ -7,15 +7,12 @@ class QuantumInspiredAttention(nn.Module):
     def __init__(self, d_model, num_quantum_states=8):
         super().__init__()
         self.d_model = d_model
-        # State preparation (analogous to quantum gates)
         self.state_preparation = nn.ModuleList([
             nn.Linear(d_model, d_model) for _ in range(num_quantum_states)
         ])
-        # Entanglement
         self.entanglement_gates = nn.ModuleList([
             nn.Linear(d_model * 2, d_model) for _ in range(num_quantum_states)
         ])
-        # Measurement
         self.measurement = nn.Sequential(
             nn.Linear(d_model * num_quantum_states, d_model),
             nn.LayerNorm(d_model),
@@ -27,38 +24,30 @@ class QuantumInspiredAttention(nn.Module):
     def forward(self, x):
         B, T, D = x.shape
         quantum_states = []
-        
-        # Prepare states with phase
         for i, gate in enumerate(self.state_preparation):
             state = gate(x)
             phase = torch.exp(1j * self.phase_rotation[i].view(1, 1, -1))
             quantum_states.append(state * phase.real)
 
-        # Entanglement logic
         entangled_states = []
         for i in range(T):
             current = x[:, i, :].unsqueeze(1).expand(-1, T, -1)
             pairs = torch.cat([current, x], dim=-1)
-            
             entangled = [gate(pairs) for gate in self.entanglement_gates]
             entangled = torch.stack(entangled, dim=-1)
-            entangled_states.append(entangled.mean(dim=1)) # Average over time
+            entangled_states.append(entangled.mean(dim=1))
 
         entangled_states = torch.stack(entangled_states, dim=1)
-        
-        # Measurement
         quantum_vector = entangled_states.reshape(B, T, -1)
         attn_logits = self.measurement(quantum_vector)
         attn_weights = F.softmax(attn_logits, dim=1)
-        
         context = torch.sum(attn_weights * x, dim=1)
         return context, attn_weights
 
-# --- NOVELTY 2: Adaptive Decomposition ---
+# --- NOVELTY 2: Adaptive Decomposition (FIXED) ---
 class AdaptiveHybridDecomposition(nn.Module):
     def __init__(self, seq_length, d_model):
         super().__init__()
-        # Filters for trend, seasonal, residual
         self.trend_filters = nn.ModuleList([
             nn.Conv1d(1, d_model//3, k, padding=k//2) for k in [25, 49, 97]
         ])
@@ -69,29 +58,34 @@ class AdaptiveHybridDecomposition(nn.Module):
             nn.Conv1d(1, d_model//3, k, padding=k//2) for k in [3, 5, 7]
         ])
         
-        # Learnable weighting
         self.attention = nn.Sequential(
             nn.Linear(seq_length, 128),
             nn.ReLU(),
-            nn.Linear(128, 9), # 3 scales * 3 types
+            nn.Linear(128, 9),
             nn.Softmax(dim=-1)
         )
         self.fusion = nn.Linear(d_model, d_model)
 
     def forward(self, x):
         B, T, F = x.shape
-        # Use target feature (index 0) for decomposition
         x_target = x[:, :, 0:1].permute(0, 2, 1) # (B, 1, T)
         weights = self.attention(x_target.squeeze(1))
         
         components = []
-        # Apply filters and weight them
         all_filters = self.trend_filters + self.seasonal_filters + self.residual_filters
+        
         for i, flt in enumerate(all_filters):
             out = flt(x_target)
+            
+            # --- FIX: Trim output to match input length T ---
+            # Even kernel sizes (24, 168) with k//2 padding result in T+1 length
+            if out.shape[-1] > T:
+                out = out[..., :T]
+            # ------------------------------------------------
+            
             components.append(out * weights[:, i].view(B, 1, 1))
             
-        decomposed = torch.cat(components, dim=1).permute(0, 2, 1) # (B, T, D)
+        decomposed = torch.cat(components, dim=1).permute(0, 2, 1)
         return self.fusion(decomposed), weights
 
 # --- NOVELTY 3: Cross Modal Fusion ---
@@ -99,24 +93,16 @@ class CrossModalFusion(nn.Module):
     def __init__(self, input_dim, d_model, dropout=0.1):
         super().__init__()
         self.d_model = d_model
-        
         self.time_enc = nn.Linear(input_dim, d_model)
         self.freq_enc = nn.Linear(input_dim * 2, d_model)
         self.wavelet_enc = nn.Linear(input_dim, d_model)
-        
         self.cross_attn = nn.MultiheadAttention(d_model, 8, dropout=dropout, batch_first=True)
-        
-        # Uncertainty Heads
         self.aleatoric = nn.Sequential(nn.Linear(d_model, 1), nn.Softplus())
         self.epistemic = nn.Sequential(nn.Linear(d_model, 1), nn.Softplus())
 
     def forward(self, x):
         B, T, _ = x.shape
-        
-        # Time Domain
         feat_t = self.time_enc(x)
-        
-        # Freq Domain (FFT)
         fft = torch.fft.rfft(x, dim=1)
         fft_feat = torch.cat([fft.real, fft.imag], dim=-1)
         if fft_feat.size(1) < T:
@@ -124,16 +110,10 @@ class CrossModalFusion(nn.Module):
         else:
             fft_feat = fft_feat[:, :T, :]
         feat_f = self.freq_enc(fft_feat)
-        
-        # "Wavelet" Domain (Approximated via Linear)
         feat_w = self.wavelet_enc(x)
-        
-        # Fusion via Attention
         all_modes = torch.stack([feat_t, feat_f, feat_w], dim=1).view(B, 3*T, -1)
         fused, _ = self.cross_attn(all_modes, all_modes, all_modes)
         fused = fused.view(B, 3, T, -1).mean(dim=1)
-        
-        # Uncertainty
         pooled = fused.mean(dim=1)
         return fused, self.aleatoric(pooled), self.epistemic(pooled)
 
@@ -143,7 +123,6 @@ class MetaLearningAdapter(nn.Module):
         super().__init__()
         self.meta_layers = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(2)])
         self.adapt_rate = nn.Parameter(torch.tensor(0.01))
-        
         self.detector = nn.Sequential(
             nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, 8), nn.Softmax(dim=-1)
         )
@@ -152,11 +131,7 @@ class MetaLearningAdapter(nn.Module):
     def forward(self, x):
         B, T, D = x.shape
         probs = self.detector(x.mean(dim=1))
-        
-        # Pattern adaptation
         adapted = sum(adapter(x) * probs[:, i].view(B, 1, 1) for i, adapter in enumerate(self.adapters))
-        
-        # MAML-like step
         out = adapted
         for layer in self.meta_layers:
             out = layer(out) + self.adapt_rate * out
@@ -168,9 +143,7 @@ class HierarchicalMultiHorizon(nn.Module):
         super().__init__()
         self.horizons = [6, 12, 24]
         self.shared = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU())
-        
         self.router = nn.Sequential(nn.Linear(d_model, len(self.horizons)), nn.Softmax(dim=-1))
-        
         self.experts = nn.ModuleList([
             nn.Linear(d_model, h) for h in self.horizons
         ])
@@ -178,14 +151,11 @@ class HierarchicalMultiHorizon(nn.Module):
     def forward(self, x):
         shared = self.shared(x)
         weights = self.router(shared)
-        
         preds = []
         for i, expert in enumerate(self.experts):
             p = expert(shared)
-            # Pad to max horizon (24)
             if p.shape[1] < 24:
                 p = F.pad(p, (0, 24 - p.shape[1]))
             preds.append(p * weights[:, i:i+1])
-            
         final = torch.stack(preds).sum(dim=0)
         return final, preds, weights
