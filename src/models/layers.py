@@ -2,17 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --- NOVELTY 1: Quantum-Inspired Attention ---
+# --- NOVELTY 1: Quantum-Inspired Attention (VECTORIZED) ---
 class QuantumInspiredAttention(nn.Module):
     def __init__(self, d_model, num_quantum_states=8):
         super().__init__()
         self.d_model = d_model
+        
+        # State preparation
         self.state_preparation = nn.ModuleList([
             nn.Linear(d_model, d_model) for _ in range(num_quantum_states)
         ])
+        
+        # Entanglement
         self.entanglement_gates = nn.ModuleList([
             nn.Linear(d_model * 2, d_model) for _ in range(num_quantum_states)
         ])
+        
+        # Measurement
         self.measurement = nn.Sequential(
             nn.Linear(d_model * num_quantum_states, d_model),
             nn.LayerNorm(d_model),
@@ -23,24 +29,43 @@ class QuantumInspiredAttention(nn.Module):
 
     def forward(self, x):
         B, T, D = x.shape
+        
+        # 1. State Preparation (Superposition)
+        # We process all states at once
         quantum_states = []
         for i, gate in enumerate(self.state_preparation):
             state = gate(x)
             phase = torch.exp(1j * self.phase_rotation[i].view(1, 1, -1))
             quantum_states.append(state * phase.real)
 
+        # 2. Entanglement (Vectorized - No more loop!)
+        # Create all-to-all pairs efficiently
+        # x shape: (B, T, D)
+        # We want a tensor of shape (B, T, T, 2*D) representing every pair
+        
+        x_i = x.unsqueeze(2).expand(-1, -1, T, -1) # (B, T, T, D) -> repeats along dim 2
+        x_j = x.unsqueeze(1).expand(-1, T, -1, -1) # (B, T, T, D) -> repeats along dim 1
+        
+        # Concatenate to get all pairs (Time_i, Time_j)
+        pairs = torch.cat([x_i, x_j], dim=-1) # (B, T, T, 2D)
+        
         entangled_states = []
-        for i in range(T):
-            current = x[:, i, :].unsqueeze(1).expand(-1, T, -1)
-            pairs = torch.cat([current, x], dim=-1)
-            entangled = [gate(pairs) for gate in self.entanglement_gates]
-            entangled = torch.stack(entangled, dim=-1)
-            entangled_states.append(entangled.mean(dim=1))
+        for gate in self.entanglement_gates:
+            # Apply linear layer to the massive (B, T, T, 2D) tensor
+            out = gate(pairs) # (B, T, T, D)
+            # Average over the second time dimension to get "entanglement with all others"
+            entangled_states.append(out.mean(dim=2)) # (B, T, D)
 
-        entangled_states = torch.stack(entangled_states, dim=1)
-        quantum_vector = entangled_states.reshape(B, T, -1)
+        entangled_states = torch.stack(entangled_states, dim=1) # (B, num_states, T, D)
+        
+        # 3. Measurement
+        # Reshape: (B, T, D * num_states)
+        # Note: We need to permute to align dimensions correctly
+        quantum_vector = entangled_states.permute(0, 2, 3, 1).reshape(B, T, -1)
+        
         attn_logits = self.measurement(quantum_vector)
         attn_weights = F.softmax(attn_logits, dim=1)
+        
         context = torch.sum(attn_weights * x, dim=1)
         return context, attn_weights
 
@@ -48,8 +73,6 @@ class QuantumInspiredAttention(nn.Module):
 class AdaptiveHybridDecomposition(nn.Module):
     def __init__(self, seq_length, d_model):
         super().__init__()
-        
-        # Calculate channel size per filter
         self.channel_per_filter = d_model // 3
         
         self.trend_filters = nn.ModuleList([
@@ -69,8 +92,6 @@ class AdaptiveHybridDecomposition(nn.Module):
             nn.Softmax(dim=-1)
         )
         
-        # --- FIX 2: Calculate correct input dimension for fusion ---
-        # 9 filters * (d_model // 3) channels
         total_channels = 9 * self.channel_per_filter
         self.fusion = nn.Linear(total_channels, d_model)
 
@@ -84,16 +105,10 @@ class AdaptiveHybridDecomposition(nn.Module):
         
         for i, flt in enumerate(all_filters):
             out = flt(x_target)
-            
-            # --- FIX 1: Trim output to match input length T ---
-            if out.shape[-1] > T:
-                out = out[..., :T]
-            
+            if out.shape[-1] > T: out = out[..., :T]
             components.append(out * weights[:, i].view(B, 1, 1))
             
-        decomposed = torch.cat(components, dim=1).permute(0, 2, 1) # (B, T, 378)
-        
-        # Now shapes match: (378 -> 128)
+        decomposed = torch.cat(components, dim=1).permute(0, 2, 1)
         return self.fusion(decomposed), weights
 
 # --- NOVELTY 3: Cross Modal Fusion ---
