@@ -44,18 +44,22 @@ class QuantumInspiredAttention(nn.Module):
         context = torch.sum(attn_weights * x, dim=1)
         return context, attn_weights
 
-# --- NOVELTY 2: Adaptive Decomposition (FIXED) ---
+# --- NOVELTY 2: Adaptive Decomposition (FIXED CHANNELS + TIME) ---
 class AdaptiveHybridDecomposition(nn.Module):
     def __init__(self, seq_length, d_model):
         super().__init__()
+        
+        # Calculate channel size per filter
+        self.channel_per_filter = d_model // 3
+        
         self.trend_filters = nn.ModuleList([
-            nn.Conv1d(1, d_model//3, k, padding=k//2) for k in [25, 49, 97]
+            nn.Conv1d(1, self.channel_per_filter, k, padding=k//2) for k in [25, 49, 97]
         ])
         self.seasonal_filters = nn.ModuleList([
-            nn.Conv1d(1, d_model//3, k, padding=k//2) for k in [7, 24, 168]
+            nn.Conv1d(1, self.channel_per_filter, k, padding=k//2) for k in [7, 24, 168]
         ])
         self.residual_filters = nn.ModuleList([
-            nn.Conv1d(1, d_model//3, k, padding=k//2) for k in [3, 5, 7]
+            nn.Conv1d(1, self.channel_per_filter, k, padding=k//2) for k in [3, 5, 7]
         ])
         
         self.attention = nn.Sequential(
@@ -64,7 +68,11 @@ class AdaptiveHybridDecomposition(nn.Module):
             nn.Linear(128, 9),
             nn.Softmax(dim=-1)
         )
-        self.fusion = nn.Linear(d_model, d_model)
+        
+        # --- FIX 2: Calculate correct input dimension for fusion ---
+        # 9 filters * (d_model // 3) channels
+        total_channels = 9 * self.channel_per_filter
+        self.fusion = nn.Linear(total_channels, d_model)
 
     def forward(self, x):
         B, T, F = x.shape
@@ -77,15 +85,15 @@ class AdaptiveHybridDecomposition(nn.Module):
         for i, flt in enumerate(all_filters):
             out = flt(x_target)
             
-            # --- FIX: Trim output to match input length T ---
-            # Even kernel sizes (24, 168) with k//2 padding result in T+1 length
+            # --- FIX 1: Trim output to match input length T ---
             if out.shape[-1] > T:
                 out = out[..., :T]
-            # ------------------------------------------------
             
             components.append(out * weights[:, i].view(B, 1, 1))
             
-        decomposed = torch.cat(components, dim=1).permute(0, 2, 1)
+        decomposed = torch.cat(components, dim=1).permute(0, 2, 1) # (B, T, 378)
+        
+        # Now shapes match: (378 -> 128)
         return self.fusion(decomposed), weights
 
 # --- NOVELTY 3: Cross Modal Fusion ---
