@@ -7,6 +7,7 @@ __pycache__/
 checkpoints/
 *.pth
 *.pt
+/notebooks/
 
 # Environment
 .env
