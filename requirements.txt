@@ -4,3 +4,6 @@ pandas
 scikit-learn
 wandb
 tqdm
+openpyxl
+matplotlib
+seaborn
